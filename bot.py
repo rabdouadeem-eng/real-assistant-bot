@@ -1,10 +1,9 @@
-import os, threading
+import os, threading, requests
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from anthropic import Anthropic
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 
-client = Anthropic(api_key=os.environ["ANTHROPIC_KEY"])
+OPENROUTER_KEY = os.environ["OPENROUTER_KEY"]
 
 SYSTEM = """أنت "مساعدك الحقيقي" — مساعد ذكي يتحدث العربية بشكل طبيعي.
 تساعد الناس بصدق وبساطة. ردودك مختصرة ومفيدة."""
@@ -12,13 +11,20 @@ SYSTEM = """أنت "مساعدك الحقيقي" — مساعد ذكي يتحد�
 async def handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_msg = update.message.text
     await update.message.chat.send_action("typing")
-    res = client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=1024,
-        system=SYSTEM,
-        messages=[{"role": "user", "content": user_msg}]
-    )
-    await update.message.reply_text(res.content[0].text)
+    
+    res = requests.post("https://openrouter.ai/api/v1/chat/completions",
+        headers={"Authorization": f"Bearer {OPENROUTER_KEY}"},
+        json={
+            "model": "google/gemini-flash-1.5",
+            "messages": [
+                {"role": "system", "content": SYSTEM},
+                {"role": "user", "content": user_msg}
+            ]
+        }
+    ).json()
+    
+    reply = res["choices"][0]["message"]["content"]
+    await update.message.reply_text(reply)
 
 class Health(BaseHTTPRequestHandler):
     def do_GET(self):

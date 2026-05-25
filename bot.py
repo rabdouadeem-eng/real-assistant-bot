@@ -12,125 +12,92 @@ from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTyp
 OPENROUTER_KEY = os.environ.get("OPENROUTER_KEY")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 PORT = int(os.environ.get("PORT", 10000))
-DEBUG = os.environ.get("DEBUG", "False").lower() == "true"
 
-# ========== إعداد التسجيل (logging) ==========
+# ========== إعداد التسجيل ==========
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.DEBUG if DEBUG else logging.INFO
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# ========== الذاكرة البسيطة لكل مستخدم (آخر 5 رسائل + ردود) ==========
-# هيكل التخزين: { user_id: deque(maxlen=10) }
-# كل عنصر في deque هو قاموس {"role": "user" أو "assistant", "content": "النص"}
+# ========== الذاكرة البسيطة ==========
 user_memory = {}
-memory_lock = threading.Lock()  # قفل لضمان أمان التعددية
+memory_lock = threading.Lock()
 
-SYSTEM_PROMPT = """أنت "مساعدك الحقيقي" — مساعد ذكي يتحدث العربية بشكل طبيعي.
-تساعد الناس بصدق وبساطة. ردودك مختصرة ومفيدة وتحترم المستخدم.
-إذا سئل المستخدم عن اسمك، فقل أنك "مساعدك الحقيقي".
-حافظ على لهجة ودودة ومحترمة."""
+SYSTEM_PROMPT = """أنت "ARIA Business Bot" - مساعد أعمال ذكي بالعربية.
+ردودك مختصرة ومفيدة ومهنية. تساعد في حل المشكلات والإجابة عن الأسئلة."""
 
-# ========== دوال مساعدة ==========
-def get_user_history(user_id: int) -> list:
-    """استرجاع تاريخ المحادثة للمستخدم (آخر 10 رسائل)."""
-    with memory_lock:
-        history = user_memory.get(user_id)
-        if history is None:
-            # إنشاء deque جديد إذا لم يكن موجوداً
-            history = deque(maxlen=10)
-            user_memory[user_id] = history
-        return list(history)  # نسخة للقراءة فقط
-
-def add_to_history(user_id: int, role: str, content: str):
-    """إضافة رسالة جديدة إلى تاريخ المحادثة."""
+def get_user_history(user_id):
     with memory_lock:
         if user_id not in user_memory:
-            user_memory[user_id] = deque(maxlen=10)
+            user_memory[user_id] = deque(maxlen=6)
+        return list(user_memory[user_id])
+
+def add_to_history(user_id, role, content):
+    with memory_lock:
+        if user_id not in user_memory:
+            user_memory[user_id] = deque(maxlen=6)
         user_memory[user_id].append({"role": role, "content": content})
 
-def clean_old_memories(max_users=1000):
-    """حذف ذاكرة المستخدمين غير النشطين للحفاظ على الذاكرة (تنظيف دوري)."""
-    # يمكن استدعاء هذه الوظيفة كل ساعة في خلفية، لكننا سنكتفي بالحذف عند تجاوز العدد
-    with memory_lock:
-        if len(user_memory) > max_users:
-            # حذف أقدم 20% من المستخدمين (سيئ لكنه بسيط)
-            to_remove = list(user_memory.keys())[:int(max_users * 0.2)]
-            for uid in to_remove:
-                del user_memory[uid]
-            logger.info(f"Cleaned {len(to_remove)} inactive users from memory")
-
-def call_openrouter_with_retry(messages, max_retries=2):
-    """إرسال طلب إلى OpenRouter مع إعادة المحاولة التلقائية."""
+# ========== الاتصال بـ OpenRouter ==========
+def ask_openrouter(messages):
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {OPENROUTER_KEY}",
         "Content-Type": "application/json"
     }
+    # استخدم نموذجًا مجانيًا وموثوقًا
     payload = {
-        "model": "google/gemini-flash-1.5",
+        "model": "nousresearch/hermes-3-llama-3.1-405b:free",
         "messages": messages,
         "temperature": 0.7,
-        "max_tokens": 1024
+        "max_tokens": 800
     }
-    for attempt in range(max_retries + 1):
+    for attempt in range(2):
         try:
-            response = requests.post(url, json=payload, headers=headers, timeout=30)
-            response.raise_for_status()  # يرفع خطأ إذا كان الكود ليس 200
-            data = response.json()
-            # التحقق من وجود الرد
-            if "choices" in data and len(data["choices"]) > 0:
-                reply = data["choices"][0]["message"]["content"]
+            response = requests.post(url, json=payload, headers=headers, timeout=40)
+            if response.status_code == 200:
+                data = response.json()
+                reply = data['choices'][0]['message']['content']
                 return reply
             else:
-                logger.error(f"OpenRouter response missing 'choices': {data}")
-                raise ValueError("استجابة غير متوقعة من OpenRouter")
-        except requests.exceptions.RequestException as e:
-            logger.warning(f"Attempt {attempt+1} failed: {e}")
-            if attempt == max_retries:
-                return "⚠️ عذراً، حدثت مشكلة تقنية في الاتصال بالذكاء الاصطناعي. حاول مجدداً بعد قليل."
-            time.sleep(2)  # انتظار قبل إعادة المحاولة
+                logger.error(f"HTTP {response.status_code}: {response.text[:200]}")
         except Exception as e:
-            logger.error(f"Unexpected error: {e}")
-            return "⚠️ خطأ غير متوقع. يرجى المحاولة لاحقاً."
-    return "⚠️ لم أتمكن من الحصول على رد. تحقق من اتصالك."
+            logger.error(f"محاولة {attempt+1} فشلت: {e}")
+            time.sleep(2)
+    return "⚠️ عذراً، حدثت مشكلة في الاتصال بالذكاء الاصطناعي. حاول مجدداً بعد قليل."
 
-# ========== معالج الرسائل الرئيسي ==========
+# ========== معالج الرسائل ==========
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    user_msg = update.message.text
-    logger.info(f"User {user_id}: {user_msg[:50]}")  # تسجيل أول 50 حرفاً
+    user_message = update.message.text
+    logger.info(f"مستخدم {user_id}: {user_message[:50]}")
 
     # إظهار أن البوت يكتب
     await update.message.chat.send_action(action="typing")
 
-    # 1. إضافة رسالة المستخدم إلى الذاكرة
-    add_to_history(user_id, "user", user_msg)
+    # حفظ رسالة المستخدم
+    add_to_history(user_id, "user", user_message)
 
-    # 2. بناء قائمة الرسائل من الذاكرة مع إضافة النظام
+    # جلب التاريخ وتحضير الرسائل
     history = get_user_history(user_id)
     messages_for_api = [{"role": "system", "content": SYSTEM_PROMPT}] + history
 
-    # 3. استدعاء OpenRouter مع إعادة المحاولة
-    reply = call_openrouter_with_retry(messages_for_api)
+    # الحصول على الرد
+    reply = ask_openrouter(messages_for_api)
 
-    # 4. إضافة رد البوت إلى الذاكرة
-    if not reply.startswith("⚠️"):  # لا نحفظ رسائل الخطأ
+    # حفظ رد البوت إذا لم يكن خطأ
+    if not reply.startswith("⚠️"):
         add_to_history(user_id, "assistant", reply)
 
-    # 5. إرسال الرد للمستخدم (تقسيم الرسائل الطويلة)
+    # إرسال الرد (تقسيم الطويل)
     if len(reply) > 4096:
         for i in range(0, len(reply), 4096):
             await update.message.reply_text(reply[i:i+4096])
     else:
         await update.message.reply_text(reply)
 
-    # 6. تنظيف الذاكرة كل 100 رسالة (تقريباً)
-    if len(user_memory) % 100 == 0:
-        threading.Thread(target=clean_old_memories, daemon=True).start()
-
-# ========== خادم الصحة (health check) لبيئات الاستضافة ==========
+# ========== خادم الصحة ==========
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -138,28 +105,27 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"OK")
     def log_message(self, format, *args):
-        # إخفاء logs خادم الصحة إذا لم يكن DEBUG
-        if DEBUG:
-            super().log_message(format, *args)
+        pass
 
 def run_health_server():
     server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
-    logger.info(f"Health check server running on port {PORT}")
+    logger.info(f"خادم الصحة يعمل على المنفذ {PORT}")
     server.serve_forever()
 
-# ========== تشغيل البوت ==========
+# ========== التشغيل ==========
 if __name__ == "__main__":
-    # التحقق من وجود المفاتيح المطلوبة
-    if not OPENROUTER_KEY or not TELEGRAM_TOKEN:
-        raise ValueError("يرجى تعيين OPENROUTER_KEY و TELEGRAM_TOKEN في المتغيرات البيئية")
+    if not OPENROUTER_KEY:
+        raise ValueError("يرجى تعيين OPENROUTER_KEY في المتغيرات البيئية")
+    if not TELEGRAM_TOKEN:
+        raise ValueError("يرجى تعيين TELEGRAM_TOKEN في المتغيرات البيئية")
 
-    # تشغيل خادم الصحة في خيط منفصل (لـ Render/Heroku)
+    # تشغيل خادم الصحة في خيط منفصل
     health_thread = threading.Thread(target=run_health_server, daemon=True)
     health_thread.start()
 
-    # إنشاء تطبيق البوت
+    # إنشاء وتشغيل البوت
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     logger.info("✅ البوت شغال الآن...")
-    app.run_polling()  # استخدام polling بدلاً من webhook (بسيط)
+    app.run_polling()

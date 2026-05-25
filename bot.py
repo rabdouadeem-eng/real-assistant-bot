@@ -38,34 +38,19 @@ def add_to_history(user_id, role, content):
         if user_id not in user_memory:
             user_memory[user_id] = deque(maxlen=6)
         user_memory[user_id].append({"role": role, "content": content})
-
 # ========== الاتصال بـ OpenRouter ==========
+MODELS = [
+    "deepseek/deepseek-chat-v3-5:free",
+    "minimax/minimax-m1:free",
+    "meta-llama/llama-3.1-8b-instruct:free",
+    "mistralai/mistral-7b-instruct:free",
+    "google/gemma-2-9b-it:free",
+]
+
 def ask_openrouter(messages):
     url = "https://openrouter.ai/api/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_KEY}",
-        "Content-Type": "application/json"
-    }
-    # استخدم نموذجًا مجانيًا وموثوقًا
-    payload = {
-        "model": "nousresearch/hermes-3-llama-3.1-405b:free",
-        "messages": messages,
-        "temperature": 0.7,
-        "max_tokens": 800
-    }
-    for attempt in range(2):
-        try:
-            response = requests.post(url, json=payload, headers=headers, timeout=40)
-            if response.status_code == 200:
-                data = response.json()
-                reply = data['choices'][0]['message']['content']
-                return reply
-            else:
-                logger.error(f"HTTP {response.status_code}: {response.text[:200]}")
-        except Exception as e:
-            logger.error(f"محاولة {attempt+1} فشلت: {e}")
-            time.sleep(2)
-    return "⚠️ عذراً، حدثت مشكلة في الاتصال بالذكاء الاصطناعي. حاول مجدداً بعد قليل."
+    ...
+
 
 # ========== معالج الرسائل ==========
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):

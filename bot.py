@@ -11,7 +11,6 @@ SYSTEM = """أنت "مساعدك الحقيقي" — مساعد ذكي يتحد�
 async def handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_msg = update.message.text
     await update.message.chat.send_action("typing")
-    
     res = requests.post("https://openrouter.ai/api/v1/chat/completions",
         headers={"Authorization": f"Bearer {OPENROUTER_KEY}"},
         json={
@@ -22,7 +21,6 @@ async def handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             ]
         }
     ).json()
-    
     reply = res["choices"][0]["message"]["content"]
     await update.message.reply_text(reply)
 

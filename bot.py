@@ -20,48 +20,47 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ========== قائمة النماذج المجانية (مرتبة من الأسرع إلى الأبطأ) ==========
+# ========== قائمة النماذج المجانية المحدثة (مايو 2026) ==========
+# ملاحظة: فقط النماذج التي تعمل حالياً
 FREE_MODELS = [
-    "google/gemini-2.0-flash-exp:free",            # الأسرع - يرد خلال 3-5 ثواني
-    "qwen/qwen-2.5-72b-instruct:free",            # سريع وجودة عالية
-    "meta-llama/llama-4-maverick:free",           # متوسط السرعة
-    "nvidia/nemotron-3-super:free",               # بطيء لكن دقيق
-    "openrouter/free"                             # آخر حل - يقرر بنفسه
+    "openrouter/free",                              # ✅ يعمل - موجه ذكي
+    "google/gemini-2.0-flash-001",                  # ✅ اسم جديد لنموذج Google
+    "mistralai/mistral-small-3.1-24b-instruct:free", # ✅ نموذج Mistral
+    "microsoft/phi-3.5-mini-instruct:free",          # ✅ نموذج Microsoft خفيف
+    "qwen/qwen-2.5-7b-instruct:free"                # ✅ نسخة أصغر من Qwen (متاحة)
 ]
 
-# ========== الذاكرة البسيطة (قلصناها لـ 3 رسائل فقط لتسريع الرد) ==========
+# ========== الذاكرة ==========
 user_memory = {}
 memory_lock = threading.Lock()
 
 SYSTEM_PROMPT = """أنت "ARIA Business Bot" - مساعد أعمال ذكي بالعربية.
-ردودك مختصرة ومفيدة ومهنية (جملتين كحد أقصى إن أمكن)."""
+ردودك مختصرة ومفيدة ومهنية."""
 
 def get_user_history(user_id):
     with memory_lock:
         if user_id not in user_memory:
-            user_memory[user_id] = deque(maxlen=3)  # خفضنا من 6 إلى 3
+            user_memory[user_id] = deque(maxlen=3)
         return list(user_memory[user_id])
 
 def add_to_history(user_id, role, content):
     with memory_lock:
         if user_id not in user_memory:
-            user_memory[user_id] = deque(maxlen=3)  # خفضنا من 6 إلى 3
+            user_memory[user_id] = deque(maxlen=3)
         user_memory[user_id].append({"role": role, "content": content})
 
-# ========== نظام Cache بسيط للأسئلة المتكررة (تسريع كبير) ==========
+# ========== Cache بسيط ==========
 cache = {}
 cache_lock = threading.Lock()
 
-def ask_openrouter_with_fallback(messages, max_retries_per_model=1):
-    """تجربة عدة نماذج بالترتيب مع Cache وتحسينات السرعة"""
+def ask_openrouter_with_fallback(messages):
+    """تجربة النماذج مرة واحدة لكل نموذج (بدون تكرار)"""
     
-    # توليد مفتاح للـ Cache من آخر رسالة للمستخدم
+    # Cache
     cache_key = messages[-1]["content"][:100] if messages else ""
-    
-    # التحقق من وجود الرد في Cache
     with cache_lock:
         if cache_key in cache and (time.time() - cache[cache_key]["time"]) < 3600:
-            logger.info(f"✅ رد من Cache (سريع جداً)")
+            logger.info(f"✅ رد من Cache")
             return cache[cache_key]["reply"]
     
     url = "https://openrouter.ai/api/v1/chat/completions"
@@ -76,68 +75,55 @@ def ask_openrouter_with_fallback(messages, max_retries_per_model=1):
         payload = {
             "model": model,
             "messages": messages,
-            "temperature": 0.5,           # خفضناها من 0.7 لتسريع الرد
-            "max_tokens": 256             # خفضنا من 1024 إلى 256 (أسرع بكثير)
+            "temperature": 0.5,
+            "max_tokens": 256
         }
         
-        for attempt in range(max_retries_per_model + 1):
-            try:
-                response = requests.post(url, json=payload, headers=headers, timeout=25)  # خفضنا من 50 إلى 25
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    if "choices" in data and len(data["choices"]) > 0:
-                        reply = data['choices'][0]['message']['content']
-                        logger.info(f"✅ نجح النموذج: {model} في {(response.elapsed.total_seconds()):.1f} ثانية")
-                        
-                        # حفظ الرد في Cache
-                        with cache_lock:
-                            cache[cache_key] = {"reply": reply, "time": time.time()}
-                        
-                        return reply
-                    else:
-                        logger.warning(f"{model}: استجابة غير متوقعة")
-                        
-                elif response.status_code == 429:
-                    time.sleep(2)  # خفضنا من 3 إلى 2
-                    logger.warning(f"{model}: تجاوز الحد (429)")
-                else:
-                    logger.warning(f"{model}: HTTP {response.status_code}")
+        try:
+            start_time = time.time()
+            response = requests.post(url, json=payload, headers=headers, timeout=20)
+            elapsed = time.time() - start_time
+            
+            if response.status_code == 200:
+                data = response.json()
+                if "choices" in data and len(data["choices"]) > 0:
+                    reply = data['choices'][0]['message']['content']
+                    logger.info(f"✅ نجح النموذج: {model} في {elapsed:.1f} ثانية")
                     
-            except requests.exceptions.Timeout:
-                logger.warning(f"{model}: انتهت المهلة (أكثر من 25 ثانية)")
-            except Exception as e:
-                logger.warning(f"{model}: {str(e)[:50]}")
+                    with cache_lock:
+                        cache[cache_key] = {"reply": reply, "time": time.time()}
+                    return reply
+                else:
+                    logger.warning(f"{model}: استجابة غير متوقعة")
+            else:
+                logger.warning(f"{model}: HTTP {response.status_code}")
                 
-            time.sleep(0.5)  # خفضنا من 1 إلى 0.5 ثانية
+        except requests.exceptions.Timeout:
+            logger.warning(f"{model}: انتهت المهلة")
+        except Exception as e:
+            logger.warning(f"{model}: {str(e)[:50]}")
     
     logger.error("جميع النماذج فشلت")
     return "⚠️ عذراً، جميع خدمات الذكاء الاصطناعي غير متاحة حالياً. حاول مجدداً بعد قليل."
 
-# ========== معالج الرسائل الرئيسي ==========
+# ========== معالج الرسائل ==========
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_message = update.message.text
     logger.info(f"مستخدم {user_id}: {user_message[:50]}")
 
-    # إظهار أن البوت يكتب
     await update.message.chat.send_action(action="typing")
 
-    # حفظ رسالة المستخدم
     add_to_history(user_id, "user", user_message)
 
-    # جلب التاريخ وتحضير الرسائل
     history = get_user_history(user_id)
     messages_for_api = [{"role": "system", "content": SYSTEM_PROMPT}] + history
 
-    # الحصول على الرد
     reply = ask_openrouter_with_fallback(messages_for_api)
 
-    # حفظ رد البوت إذا لم يكن خطأ
     if not reply.startswith("⚠️"):
         add_to_history(user_id, "assistant", reply)
 
-    # إرسال الرد
     if len(reply) > 4096:
         for i in range(0, len(reply), 4096):
             await update.message.reply_text(reply[i:i+4096])
@@ -166,13 +152,11 @@ if __name__ == "__main__":
     if not TELEGRAM_TOKEN:
         raise ValueError("يرجى تعيين TELEGRAM_TOKEN في المتغيرات البيئية")
 
-    # تشغيل خادم الصحة
     health_thread = threading.Thread(target=run_health_server, daemon=True)
     health_thread.start()
 
-    # إنشاء وتشغيل البوت
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    logger.info("✅ البوت شغال الآن وبسرعة أفضل...")
+    logger.info("✅ البوت شغال الآن...")
     app.run_polling()

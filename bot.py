@@ -20,7 +20,17 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ========== الذاكرة البسيطة ==========
+# ========== قائمة النماذج المجانية (الترتيب حسب الأفضلية) ==========
+FREE_MODELS = [
+    "openrouter/free",                             # الموجه الذكي (يختار الأفضل تلقائيًا)
+    "google/gemini-2.0-flash-exp:free",            # نموذج Google السريع والقوي
+    "nvidia/nemotron-3-super:free",                # نموذج Nvidia مع سياق 1M
+    "meta-llama/llama-4-maverick:free",            # نموذج Meta الجديد
+    "microsoft/phi-3-mini-128k-instruct:free",     # نموذج Microsoft الخفيف
+    "qwen/qwen-2.5-72b-instruct:free"              # نموذج علي بابا القوي
+]
+
+# ========== الذاكرة البسيطة لكل مستخدم ==========
 user_memory = {}
 memory_lock = threading.Lock()
 
@@ -39,35 +49,65 @@ def add_to_history(user_id, role, content):
             user_memory[user_id] = deque(maxlen=6)
         user_memory[user_id].append({"role": role, "content": content})
 
-# ========== الاتصال بـ OpenRouter ==========
-def ask_openrouter(messages):
+# ========== الاتصال بـ OpenRouter مع نظام Fallback ==========
+def ask_openrouter_with_fallback(messages, max_retries_per_model=1):
+    """
+    تجربة عدة نماذج بالترتيب حتى يعمل أحدها.
+    إذا فشل نموذج، ينتقل تلقائيًا إلى التالي.
+    """
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {OPENROUTER_KEY}",
         "Content-Type": "application/json"
     }
-    # استخدم نموذجًا مجانيًا وموثوقًا
-    payload = {
-        "model": "nousresearch/hermes-3-llama-3.1-405b:free",
-        "messages": messages,
-        "temperature": 0.7,
-        "max_tokens": 800
-    }
-    for attempt in range(2):
-        try:
-            response = requests.post(url, json=payload, headers=headers, timeout=40)
-            if response.status_code == 200:
-                data = response.json()
-                reply = data['choices'][0]['message']['content']
-                return reply
-            else:
-                logger.error(f"HTTP {response.status_code}: {response.text[:200]}")
-        except Exception as e:
-            logger.error(f"محاولة {attempt+1} فشلت: {e}")
-            time.sleep(2)
-    return "⚠️ عذراً، حدثت مشكلة في الاتصال بالذكاء الاصطناعي. حاول مجدداً بعد قليل."
+    
+    errors_log = []
+    
+    for model in FREE_MODELS:
+        logger.info(f"جاري تجربة النموذج: {model}")
+        
+        payload = {
+            "model": model,
+            "messages": messages,
+            "temperature": 0.7,
+            "max_tokens": 1024
+        }
+        
+        for attempt in range(max_retries_per_model + 1):
+            try:
+                response = requests.post(url, json=payload, headers=headers, timeout=50)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    if "choices" in data and len(data["choices"]) > 0:
+                        reply = data['choices'][0]['message']['content']
+                        logger.info(f"✅ نجح النموذج: {model}")
+                        return reply
+                    else:
+                        errors_log.append(f"{model}: استجابة غير متوقعة")
+                        
+                elif response.status_code == 429:
+                    # تجاوز الحد - انتظر ثم حاول مرة أخرى
+                    time.sleep(3)
+                    errors_log.append(f"{model}: تجاوز الحد (429)")
+                    
+                else:
+                    errors_log.append(f"{model}: HTTP {response.status_code} - {response.text[:100]}")
+                    
+            except requests.exceptions.Timeout:
+                errors_log.append(f"{model}: انتهت المهلة")
+            except requests.exceptions.ConnectionError:
+                errors_log.append(f"{model}: خطأ في الاتصال")
+            except Exception as e:
+                errors_log.append(f"{model}: {str(e)[:100]}")
+                
+            time.sleep(1)  # انتظار قصير بين المحاولات
+    
+    # إذا فشلت جميع النماذج
+    logger.error(f"جميع النماذج فشلت: {errors_log}")
+    return "⚠️ عذراً، جميع خدمات الذكاء الاصطناعي غير متاحة حالياً. حاول مجدداً بعد قليل."
 
-# ========== معالج الرسائل ==========
+# ========== معالج الرسائل الرئيسي ==========
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_message = update.message.text
@@ -83,8 +123,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     history = get_user_history(user_id)
     messages_for_api = [{"role": "system", "content": SYSTEM_PROMPT}] + history
 
-    # الحصول على الرد
-    reply = ask_openrouter(messages_for_api)
+    # الحصول على الرد مع نظام الاحتياطي
+    reply = ask_openrouter_with_fallback(messages_for_api)
 
     # حفظ رد البوت إذا لم يكن خطأ
     if not reply.startswith("⚠️"):

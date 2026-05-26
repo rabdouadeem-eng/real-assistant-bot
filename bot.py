@@ -1,116 +1,150 @@
 import os
-import threading
-import requests
-import time
 import logging
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from collections import deque
+import requests
 from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    filters,
+    ContextTypes,
+)
 
-# ========== إعدادات البيئة ==========
-OPENROUTER_KEY = os.environ.get("OPENROUTER_KEY")
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-PORT = int(os.environ.get("PORT", 10000))
+# ============================================================
+# ARIA BUSINESS BOT - بوت الأعمال الذكي
+# Stack: python-telegram-bot + OpenRouter
+# ============================================================
 
-# ========== إعداد التسجيل ==========
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
 
-# ========== الذاكرة البسيطة ==========
-user_memory = {}
-memory_lock = threading.Lock()
+# ============================================================
+# CONFIG - من متغيرات البيئة
+# ============================================================
+TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
+OPENROUTER_KEY   = os.environ.get("OPENROUTER_API_KEY", "")
+MODEL            = os.environ.get("OPENROUTER_MODEL", "google/gemini-flash-1.5")
+BOT_NAME         = "ARIA Business Bot"
 
-SYSTEM_PROMPT = """أنت "ARIA Business Bot" - مساعد أعمال ذكي بالعربية.
-ردودك مختصرة ومفيدة ومهنية. تساعد في حل المشكلات والإجابة عن الأسئلة."""
+# System prompt بالعربية
+SYSTEM_PROMPT = """أنت ARIA، مساعد أعمال ذكي متخصص في مساعدة رواد الأعمال العرب.
+تتحدث بالعربية الفصحى المبسطة أو الدارجة حسب المستخدم.
+تساعد في: استراتيجية الأعمال، التسويق، الأتمتة، أدوات الذكاء الاصطناعي.
+ردودك دائماً واضحة، عملية، ومباشرة."""
 
-def get_user_history(user_id):
-    with memory_lock:
-        if user_id not in user_memory:
-            user_memory[user_id] = deque(maxlen=6)
-        return list(user_memory[user_id])
+# ============================================================
+# ذاكرة المحادثة (session-based)
+# ============================================================
+conversation_history: dict[int, list] = {}
 
-def add_to_history(user_id, role, content):
-    with memory_lock:
-        if user_id not in user_memory:
-            user_memory[user_id] = deque(maxlen=6)
-        user_memory[user_id].append({"role": role, "content": content})
-# ========== الاتصال بـ OpenRouter ==========
-MODELS = [
-    "deepseek/deepseek-chat-v3-5:free",
-    "minimax/minimax-m1:free",
-    "meta-llama/llama-3.1-8b-instruct:free",
-    "mistralai/mistral-7b-instruct:free",
-    "google/gemma-2-9b-it:free",
-]
+def get_history(user_id: int) -> list:
+    if user_id not in conversation_history:
+        conversation_history[user_id] = []
+    return conversation_history[user_id]
 
-def ask_openrouter(messages):
-    url = "https://openrouter.ai/api/v1/chat/completions"
-    ...
+def add_to_history(user_id: int, role: str, content: str):
+    history = get_history(user_id)
+    history.append({"role": role, "content": content})
+    # احتفظ بآخر 10 رسائل فقط
+    if len(history) > 10:
+        conversation_history[user_id] = history[-10:]
 
-
-# ========== معالج الرسائل ==========
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    user_message = update.message.text
-    logger.info(f"مستخدم {user_id}: {user_message[:50]}")
-
-    # إظهار أن البوت يكتب
-    await update.message.chat.send_action(action="typing")
-
-    # حفظ رسالة المستخدم
+# ============================================================
+# استدعاء OpenRouter API
+# ============================================================
+def call_openrouter(user_id: int, user_message: str) -> str:
     add_to_history(user_id, "user", user_message)
 
-    # جلب التاريخ وتحضير الرسائل
-    history = get_user_history(user_id)
-    messages_for_api = [{"role": "system", "content": SYSTEM_PROMPT}] + history
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_KEY}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://aria-business-bot.onrender.com",
+        "X-Title": BOT_NAME,
+    }
 
-    # الحصول على الرد
-    reply = ask_openrouter(messages_for_api)
+    payload = {
+        "model": MODEL,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            *get_history(user_id),
+        ],
+        "max_tokens": 1024,
+        "temperature": 0.7,
+    }
 
-    # حفظ رد البوت إذا لم يكن خطأ
-    if not reply.startswith("⚠️"):
+    try:
+        response = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=30,
+        )
+        response.raise_for_status()
+        reply = response.json()["choices"][0]["message"]["content"]
         add_to_history(user_id, "assistant", reply)
+        return reply
 
-    # إرسال الرد (تقسيم الطويل)
-    if len(reply) > 4096:
-        for i in range(0, len(reply), 4096):
-            await update.message.reply_text(reply[i:i+4096])
-    else:
-        await update.message.reply_text(reply)
+    except requests.exceptions.Timeout:
+        return "⏱️ انتهت مهلة الاتصال، حاول مرة أخرى."
+    except Exception as e:
+        logger.error(f"OpenRouter error: {e}")
+        return "⚠️ حدث خطأ تقني، حاول مرة أخرى."
 
-# ========== خادم الصحة ==========
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-Type", "text/plain")
-        self.end_headers()
-        self.wfile.write(b"OK")
-    def log_message(self, format, *args):
-        pass
+# ============================================================
+# Handlers
+# ============================================================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    user_id = user.id
+    conversation_history[user_id] = []  # reset عند /start
+    await update.message.reply_text(
+        f"🤖 *{BOT_NAME}* جاهز!\n\n"
+        "مرحباً بك — أنا ARIA، مساعدك الذكي للأعمال.\n"
+        "كيف يمكنني مساعدتك اليوم؟",
+        parse_mode="Markdown",
+    )
 
-def run_health_server():
-    server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
-    logger.info(f"خادم الصحة يعمل على المنفذ {PORT}")
-    server.serve_forever()
+async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    conversation_history[user_id] = []
+    await update.message.reply_text("🔄 تمت إعادة تعيين المحادثة.")
 
-# ========== التشغيل ==========
-if __name__ == "__main__":
-    if not OPENROUTER_KEY:
-        raise ValueError("يرجى تعيين OPENROUTER_KEY في المتغيرات البيئية")
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_text = update.message.text
+
+    # مؤشر الكتابة
+    await context.bot.send_chat_action(
+        chat_id=update.effective_chat.id, action="typing"
+    )
+
+    reply = call_openrouter(user_id, user_text)
+    await update.message.reply_text(reply)
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    logger.error(f"Error: {context.error}")
+
+# ============================================================
+# MAIN
+# ============================================================
+def main():
     if not TELEGRAM_TOKEN:
-        raise ValueError("يرجى تعيين TELEGRAM_TOKEN في المتغيرات البيئية")
+        raise ValueError("❌ TELEGRAM_TOKEN غير موجود في متغيرات البيئة")
+    if not OPENROUTER_KEY:
+        raise ValueError("❌ OPENROUTER_API_KEY غير موجود في متغيرات البيئة")
 
-    # تشغيل خادم الصحة في خيط منفصل
-    health_thread = threading.Thread(target=run_health_server, daemon=True)
-    health_thread.start()
+    app = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    # إنشاء وتشغيل البوت
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("reset", reset))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_error_handler(error_handler)
 
-    logger.info("✅ البوت شغال الآن...")
-    app.run_polling()
+    logger.info(f"🚀 {BOT_NAME} يعمل الآن...")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+if __name__ == "__main__":
+    main()

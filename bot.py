@@ -6,7 +6,7 @@ import logging
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from collections import deque
 from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
+from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, filters, ContextTypes
 
 # ========== إعدادات البيئة ==========
 OPENROUTER_KEY = os.environ.get("OPENROUTER_KEY")
@@ -20,14 +20,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ========== قائمة النماذج المجانية المحدثة (مايو 2026) ==========
-# ملاحظة: فقط النماذج التي تعمل حالياً
+# ========== قائمة النماذج — NaraRouter ==========
 FREE_MODELS = [
-    "openrouter/free",                              # ✅ يعمل - موجه ذكي
-    "google/gemini-2.0-flash-001",                  # ✅ اسم جديد لنموذج Google
-    "mistralai/mistral-small-3.1-24b-instruct:free", # ✅ نموذج Mistral
-    "microsoft/phi-3.5-mini-instruct:free",          # ✅ نموذج Microsoft خفيف
-    "qwen/qwen-2.5-7b-instruct:free"                # ✅ نسخة أصغر من Qwen (متاحة)
+    "mimo-v2.5-free",
+    "deepseek-3.2",
+    "mistral-large",
 ]
 
 # ========== الذاكرة ==========
@@ -54,42 +51,36 @@ cache = {}
 cache_lock = threading.Lock()
 
 def ask_openrouter_with_fallback(messages):
-    """تجربة النماذج مرة واحدة لكل نموذج (بدون تكرار)"""
-    
-    # Cache
     cache_key = messages[-1]["content"][:100] if messages else ""
     with cache_lock:
         if cache_key in cache and (time.time() - cache[cache_key]["time"]) < 3600:
-            logger.info(f"✅ رد من Cache")
+            logger.info("✅ رد من Cache")
             return cache[cache_key]["reply"]
-    
-    url = "https://openrouter.ai/api/v1/chat/completions"
+
+    url = "https://router.bynara.id/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {OPENROUTER_KEY}",
         "Content-Type": "application/json"
     }
-    
+
     for model in FREE_MODELS:
         logger.info(f"جاري تجربة النموذج: {model}")
-        
         payload = {
             "model": model,
             "messages": messages,
             "temperature": 0.5,
             "max_tokens": 256
         }
-        
         try:
             start_time = time.time()
-            response = requests.post(url, json=payload, headers=headers, timeout=20)
+            response = requests.post(url, json=payload, headers=headers, timeout=45)
             elapsed = time.time() - start_time
-            
+
             if response.status_code == 200:
                 data = response.json()
                 if "choices" in data and len(data["choices"]) > 0:
                     reply = data['choices'][0]['message']['content']
                     logger.info(f"✅ نجح النموذج: {model} في {elapsed:.1f} ثانية")
-                    
                     with cache_lock:
                         cache[cache_key] = {"reply": reply, "time": time.time()}
                     return reply
@@ -97,12 +88,12 @@ def ask_openrouter_with_fallback(messages):
                     logger.warning(f"{model}: استجابة غير متوقعة")
             else:
                 logger.warning(f"{model}: HTTP {response.status_code}")
-                
+
         except requests.exceptions.Timeout:
             logger.warning(f"{model}: انتهت المهلة")
         except Exception as e:
             logger.warning(f"{model}: {str(e)[:50]}")
-    
+
     logger.error("جميع النماذج فشلت")
     return "⚠️ عذراً، جميع خدمات الذكاء الاصطناعي غير متاحة حالياً. حاول مجدداً بعد قليل."
 
@@ -113,7 +104,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"مستخدم {user_id}: {user_message[:50]}")
 
     await update.message.chat.send_action(action="typing")
-
     add_to_history(user_id, "user", user_message)
 
     history = get_user_history(user_id)
@@ -129,6 +119,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(reply[i:i+4096])
     else:
         await update.message.reply_text(reply)
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "👋 *مرحباً! أنا ARIA Business Bot*\n\nمساعدك الذكي للأعمال. كيف يمكنني مساعدتك؟ 💼",
+        parse_mode="Markdown"
+    )
 
 # ========== خادم الصحة ==========
 class HealthHandler(BaseHTTPRequestHandler):
@@ -156,7 +152,8 @@ if __name__ == "__main__":
     health_thread.start()
 
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    logger.info("✅ البوت شغال الآن...")
+    logger.info("✅ ARIA Business Bot شغال الآن — NaraRouter active")
     app.run_polling()
